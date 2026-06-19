@@ -1,3 +1,5 @@
+import json
+
 import folder_paths
 
 from typing import Union
@@ -10,6 +12,51 @@ from .server.utils_info import get_model_info_file_data
 from .log import log_node_warn
 
 NODE_NAME = get_name('Power Lora Loader')
+
+
+# ---- lora_config sync helpers (local addition) ----------------------------
+
+def _rows_from_kwargs(kwargs):
+  """Collect the node's own lora_* widget rows, in order."""
+  rows = []
+  for key, value in kwargs.items():
+    if (key.upper().startswith('LORA_') and isinstance(value, dict)
+        and 'on' in value and 'lora' in value and 'strength' in value):
+      rows.append(value)
+  return rows
+
+
+def _parse_lora_config(s):
+  """Parse the lora_config input into a list of row dicts, or None if absent.
+
+  Accepts a bare JSON list, a {"loras": [...]} object (so it interops with the
+  standalone PowerLoraPlus format), or doubly-encoded JSON.
+  """
+  if not isinstance(s, str) or not s.strip():
+    return None
+  try:
+    v = json.loads(s)
+  except (ValueError, TypeError):
+    return None
+  if isinstance(v, str):
+    return _parse_lora_config(v)
+  if isinstance(v, dict):
+    v = v.get('loras', [])
+  if not isinstance(v, list):
+    return None
+  return [r for r in v if isinstance(r, dict) and 'lora' in r and 'strength' in r]
+
+
+def _serialize_rows(rows):
+  """Normalize rows for the lora_config output."""
+  out = []
+  for r in rows:
+    row = {'on': bool(r.get('on', True)), 'lora': r.get('lora', ''),
+           'strength': r.get('strength', 0)}
+    if r.get('strengthTwo', None) is not None:
+      row['strengthTwo'] = r['strengthTwo']
+    out.append(row)
+  return out
 
 
 class RgthreePowerLoraLoader:
@@ -27,35 +74,44 @@ class RgthreePowerLoraLoader:
       "optional": FlexibleOptionalInputType(type=any_type, data={
         "model": ("MODEL",),
         "clip": ("CLIP",),
+        "lora_config": ("STRING", {"forceInput": True}),
       }),
       "hidden": {},
     }
 
-  RETURN_TYPES = ("MODEL", "CLIP")
-  RETURN_NAMES = ("MODEL", "CLIP")
+  RETURN_TYPES = ("MODEL", "CLIP", "STRING")
+  RETURN_NAMES = ("MODEL", "CLIP", "lora_config")
   FUNCTION = "load_loras"
 
-  def load_loras(self, model=None, clip=None, **kwargs):
-    """Loops over the provided loras in kwargs and applies valid ones."""
-    for key, value in kwargs.items():
-      key = key.upper()
-      if key.startswith('LORA_') and 'on' in value and 'lora' in value and 'strength' in value:
-        strength_model = value['strength']
-        # If we just passed one strength value, then use it for both, if we passed a strengthTwo
-        # as well, then our `strength` will be for the model, and `strengthTwo` for clip.
-        strength_clip = value['strengthTwo'] if 'strengthTwo' in value else None
-        if clip is None:
-          if strength_clip is not None and strength_clip != 0:
-            log_node_warn(NODE_NAME, 'Recieved clip strength eventhough no clip supplied!')
-          strength_clip = 0
-        else:
-          strength_clip = strength_clip if strength_clip is not None else strength_model
-        if value['on'] and (strength_model != 0 or strength_clip != 0):
-          lora = get_lora_by_filename(value['lora'], log_node=self.NAME)
-          if model is not None and lora is not None:
-            model, clip = LoraLoader().load_lora(model, clip, lora, strength_model, strength_clip)
+  def load_loras(self, model=None, clip=None, lora_config=None, **kwargs):
+    """Applies loras and emits the effective config on `lora_config`.
 
-    return (model, clip)
+    When the `lora_config` input is connected (non-empty), its rows are applied
+    so a second loader mirrors the first; otherwise the node's own lora_* widget
+    rows are used. Either way the rows actually used are returned as JSON so the
+    output can drive another loader (sync) or be chained.
+    """
+    rows = _parse_lora_config(lora_config)
+    if rows is None:
+      rows = _rows_from_kwargs(kwargs)
+
+    for value in rows:
+      strength_model = value['strength']
+      # If we just passed one strength value, then use it for both, if we passed a strengthTwo
+      # as well, then our `strength` will be for the model, and `strengthTwo` for clip.
+      strength_clip = value['strengthTwo'] if value.get('strengthTwo') is not None else None
+      if clip is None:
+        if strength_clip is not None and strength_clip != 0:
+          log_node_warn(NODE_NAME, 'Recieved clip strength eventhough no clip supplied!')
+        strength_clip = 0
+      else:
+        strength_clip = strength_clip if strength_clip is not None else strength_model
+      if value.get('on') and (strength_model != 0 or strength_clip != 0):
+        lora = get_lora_by_filename(value['lora'], log_node=self.NAME)
+        if model is not None and lora is not None:
+          model, clip = LoraLoader().load_lora(model, clip, lora, strength_model, strength_clip)
+
+    return (model, clip, json.dumps(_serialize_rows(rows)))
 
   @classmethod
   def get_enabled_loras_from_prompt_node(cls,
