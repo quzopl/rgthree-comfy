@@ -97,10 +97,14 @@ function maybeSync(node) {
 
 app.registerExtension({
   name: "rgthree.power.lora.sync",
-  async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData?.name !== RG_TYPE) return;
-    const onDraw = nodeType.prototype.onDrawForeground;
-    nodeType.prototype.onDrawForeground = function (ctx) {
+  // rgthree overrides the node class (OVERRIDDEN_SERVER_NODES), so patching the
+  // nodeType prototype in beforeRegisterNodeDef misses the real instances.
+  // Patch each instance directly via nodeCreated (override-agnostic).
+  nodeCreated(node) {
+    if (nodeType(node) !== RG_TYPE || node.__pls_hooked) return;
+    node.__pls_hooked = true;
+    const onDraw = node.onDrawForeground;
+    node.onDrawForeground = function (ctx) {
       try { maybeSync(this); } catch (e) {}
       return onDraw ? onDraw.apply(this, arguments) : undefined;
     };
